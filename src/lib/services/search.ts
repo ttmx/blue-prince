@@ -1,6 +1,6 @@
 import { bufferToVector, db } from '$lib/services/db';
 import { IMAGE_MODEL, embedImageQuery, embedQuery } from '$lib/services/ai.svelte';
-import type { EvidenceItem, SearchResult } from '$lib/types/evidence';
+import type { EvidenceItem, SearchResult, SearchTelemetry } from '$lib/types/evidence';
 
 export type SearchFilters = {
 	kind: 'all' | 'screenshot' | 'note';
@@ -20,11 +20,11 @@ export function defaultFilters() {
 	return { ...emptyFilters };
 }
 
-export async function searchEvidence(
+export function keywordSearchEvidence(
 	items: EvidenceItem[],
 	query: string,
 	filters: SearchFilters
-): Promise<SearchResult[]> {
+): SearchResult[] {
 	const normalizedQuery = normalize(query);
 	const filtered = applyFilters(items, filters);
 
@@ -33,26 +33,96 @@ export async function searchEvidence(
 	}
 
 	const terms = normalizedQuery.split(/\s+/).filter(Boolean);
+
+	const results = filtered
+		.map((item) => {
+			const haystack = searchableText(item);
+			const matchedTerms = terms.filter((term) => haystack.includes(term));
+			const keywordScore = terms.length ? matchedTerms.length / terms.length : 0;
+
+			return {
+				item,
+				score: keywordScore,
+				reasons: matchedTerms.length
+					? [`${matchedTerms.length} keyword match${matchedTerms.length === 1 ? '' : 'es'}`]
+					: []
+			};
+		})
+		.filter((result) => result.score > 0 || result.reasons.length > 0)
+		.sort((a, b) => b.score - a.score || b.item.updatedAt - a.item.updatedAt);
+
+	return results;
+}
+
+export async function searchEvidence(
+	items: EvidenceItem[],
+	query: string,
+	filters: SearchFilters,
+	onTelemetry?: (telemetry: SearchTelemetry) => void
+): Promise<SearchResult[]> {
+	const telemetry: SearchTelemetry = {
+		phase: 'Preparing search',
+		startedAt: performance.now()
+	};
+	onTelemetry?.({ ...telemetry });
+
+	const normalizedQuery = normalize(query);
+	const filtered = applyFilters(items, filters);
+
+	if (!normalizedQuery) {
+		telemetry.phase = 'Ready';
+		telemetry.finishedAt = performance.now();
+		onTelemetry?.({ ...telemetry });
+		return filtered.map((item) => ({ item, score: 0, reasons: [] }));
+	}
+
+	const terms = normalizedQuery.split(/\s+/).filter(Boolean);
 	let queryVector: number[] | undefined;
 	let imageQueryVector: number[] | undefined;
 
-	try {
-		[queryVector, imageQueryVector] = await Promise.all([embedQuery(query), embedImageQuery(query)]);
-	} catch {
-		queryVector = undefined;
-		imageQueryVector = undefined;
-	}
-
+	telemetry.phase = 'Loading saved vectors';
+	onTelemetry?.({ ...telemetry });
 	const [textEmbeddings, imageEmbeddings] = await Promise.all([
-		queryVector ? db.embeddings.where('modality').equals('text').toArray() : [],
-		imageQueryVector
-			? db.embeddings
-					.where('modality')
-					.equals('image')
-					.filter((embedding) => embedding.modelId === IMAGE_MODEL)
-					.toArray()
-			: []
+		db.embeddings.where('modality').equals('text').toArray(),
+		db.embeddings
+			.where('modality')
+			.equals('image')
+			.filter((embedding) => embedding.modelId === IMAGE_MODEL)
+			.toArray()
 	]);
+
+	telemetry.phase = 'Embedding query';
+	onTelemetry?.({ ...telemetry });
+	const [textQueryResult, imageQueryResult] = await Promise.allSettled([
+		textEmbeddings.length ? timed('text', () => embedQuery(query)) : Promise.resolve(undefined),
+		imageEmbeddings.length ? timed('image', () => embedImageQuery(query)) : Promise.resolve(undefined)
+	]);
+
+	if (textQueryResult.status === 'fulfilled') {
+		queryVector = textQueryResult.value?.value;
+		telemetry.textEmbeddingMs = textQueryResult.value?.durationMs;
+	}
+	if (imageQueryResult.status === 'fulfilled') {
+		imageQueryVector = imageQueryResult.value?.value;
+		telemetry.imageEmbeddingMs = imageQueryResult.value?.durationMs;
+	}
+	if (textQueryResult.status === 'rejected' || imageQueryResult.status === 'rejected') {
+		telemetry.error = [textQueryResult, imageQueryResult]
+			.filter((result) => result.status === 'rejected')
+			.map((result) => (result as PromiseRejectedResult).reason)
+			.map((reason) => (reason instanceof Error ? reason.message : String(reason)))
+			.join(' ');
+		console.warn('Search embedding failed', telemetry.error);
+	}
+	console.info('Search embedding timings', {
+		query,
+		textEmbeddingMs: telemetry.textEmbeddingMs,
+		imageEmbeddingMs: telemetry.imageEmbeddingMs
+	});
+
+	telemetry.phase = 'Scoring evidence';
+	onTelemetry?.({ ...telemetry });
+	const vectorStartedAt = performance.now();
 	const textVectorsByEvidence = new Map(
 		textEmbeddings.map((embedding) => [embedding.evidenceId, bufferToVector(embedding.vector)])
 	);
@@ -60,11 +130,9 @@ export async function searchEvidence(
 		imageEmbeddings.map((embedding) => [embedding.evidenceId, bufferToVector(embedding.vector)])
 	);
 
-	return filtered
+	const results = filtered
 		.map((item) => {
-			const haystack = normalize(
-				[item.title, item.room, item.puzzle, item.tags.join(' '), item.ocrText, item.manualNotes].join(' ')
-			);
+			const haystack = searchableText(item);
 			const matchedTerms = terms.filter((term) => haystack.includes(term));
 			const keywordScore = terms.length ? matchedTerms.length / terms.length : 0;
 			const textVector = textVectorsByEvidence.get(item.id);
@@ -83,6 +151,17 @@ export async function searchEvidence(
 		})
 		.filter((result) => result.score > 0 || result.reasons.length > 0)
 		.sort((a, b) => b.score - a.score || b.item.updatedAt - a.item.updatedAt);
+
+	telemetry.vectorSearchMs = performance.now() - vectorStartedAt;
+	telemetry.finishedAt = performance.now();
+	telemetry.phase = 'Ready';
+	onTelemetry?.({ ...telemetry });
+
+	return results;
+}
+
+function searchableText(item: EvidenceItem) {
+	return normalize([item.title, item.room, item.puzzle, item.tags.join(' '), item.ocrText, item.manualNotes].join(' '));
 }
 
 function applyFilters(items: EvidenceItem[], filters: SearchFilters) {
@@ -113,4 +192,12 @@ function cosine(query: number[], vector: Float32Array) {
 
 	if (!queryMagnitude || !vectorMagnitude) return 0;
 	return dot / (Math.sqrt(queryMagnitude) * Math.sqrt(vectorMagnitude));
+}
+
+async function timed<T>(label: string, run: () => Promise<T>) {
+	const startedAt = performance.now();
+	const value = await run();
+	const durationMs = performance.now() - startedAt;
+	console.info(`${label} embedding finished in ${Math.round(durationMs)}ms`);
+	return { value, durationMs };
 }

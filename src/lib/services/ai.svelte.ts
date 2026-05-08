@@ -1,8 +1,9 @@
 import { db, getSetting, vectorToBuffer } from '$lib/services/db';
 import { blobToDataUrl, createScaledImageBlob } from '$lib/services/media';
-import type { EvidenceItem, ModelStatus, OcrProvider } from '$lib/types/evidence';
+import type { EvidenceItem, ModelStatus, OcrProvider, TextEmbeddingProvider } from '$lib/types/evidence';
 
 const TEXT_MODEL = 'Xenova/all-MiniLM-L6-v2';
+const SERVER_TEXT_MODEL = 'spark-ai-backend/text';
 export const IMAGE_MODEL = 'onnx-community/siglip2-so400m-patch16-384-ONNX';
 const OCR_LANG = 'eng';
 const MISTRAL_OCR_MODEL = 'mistral-ocr-latest';
@@ -21,6 +22,7 @@ let preferredDevice: 'webgpu' | 'wasm' | undefined;
 export const modelStatus = $state<ModelStatus>({
 	ocr: 'idle',
 	ocrProvider: 'tesseract',
+	textProvider: 'browser',
 	text: 'idle',
 	image: 'idle',
 	backend: 'detecting',
@@ -40,6 +42,13 @@ function setBusy() {
 
 export function setOcrProvider(provider: OcrProvider) {
 	modelStatus.ocrProvider = provider;
+}
+
+export function setTextEmbeddingProvider(provider: TextEmbeddingProvider) {
+	modelStatus.textProvider = provider;
+	if (provider === 'server') {
+		modelStatus.backend = 'server';
+	}
 }
 
 async function getPreferredDevice() {
@@ -186,6 +195,9 @@ async function runOcr(blob: Blob) {
 	if (modelStatus.ocrProvider === 'mistral') {
 		return runMistralOcr(blob);
 	}
+	if (modelStatus.ocrProvider === 'server') {
+		return runServerOcr(blob);
+	}
 
 	return runTesseractOcr(blob);
 }
@@ -232,6 +244,24 @@ async function runMistralOcr(blob: Blob) {
 		.join('\n\n');
 }
 
+async function runServerOcr(blob: Blob) {
+	const form = new FormData();
+	form.append('file', blob, 'evidence.png');
+
+	const response = await fetch('/api/ai/ocr', {
+		method: 'POST',
+		body: form
+	});
+
+	if (!response.ok) {
+		const message = await response.text();
+		throw new Error(`Private AI OCR failed (${response.status}): ${message || response.statusText}`);
+	}
+
+	const result = (await response.json()) as { text?: string };
+	return (result.text ?? '').trim();
+}
+
 export async function embedEvidenceText(item: EvidenceItem) {
 	const text = [item.title, item.room, item.puzzle, item.tags.join(' '), item.ocrText, item.manualNotes]
 		.filter(Boolean)
@@ -243,7 +273,7 @@ export async function embedEvidenceText(item: EvidenceItem) {
 	modelStatus.text = 'embedding';
 	setBusy();
 	const vector = await embedText(text);
-	await upsertEmbedding(item.id, 'text', TEXT_MODEL, vector);
+	await upsertEmbedding(item.id, 'text', textModelId(), vector);
 	modelStatus.text = 'ready';
 	setBusy();
 }
@@ -289,12 +319,42 @@ export async function embedImageQuery(query: string) {
 }
 
 async function embedText(text: string) {
+	if (modelStatus.textProvider === 'server') {
+		return embedTextWithServer(text);
+	}
+
 	const extractor = (await getTextExtractor()) as (
 		input: string,
 		options: { pooling: string; normalize: boolean }
 	) => Promise<{ data: Float32Array | number[] }>;
 	const output = await extractor(text, { pooling: 'mean', normalize: true });
 	return Array.from(output.data);
+}
+
+async function embedTextWithServer(text: string) {
+	const response = await fetch('/api/ai/embeddings', {
+		method: 'POST',
+		headers: {
+			'Content-Type': 'application/json'
+		},
+		body: JSON.stringify({ input: text })
+	});
+
+	if (!response.ok) {
+		const message = await response.text();
+		throw new Error(`Private AI embedding failed (${response.status}): ${message || response.statusText}`);
+	}
+
+	const result = (await response.json()) as {
+		data?: Array<{ embedding?: number[] }>;
+		model?: string;
+	};
+	const embedding = result.data?.[0]?.embedding;
+	if (!embedding?.length) {
+		throw new Error('Private AI embedding returned no vector.');
+	}
+
+	return normalizeVector(embedding);
 }
 
 async function embedImage(blob: Blob) {
@@ -332,4 +392,8 @@ async function upsertEmbedding(
 		dimensions: vector.length,
 		createdAt: Date.now()
 	});
+}
+
+function textModelId() {
+	return modelStatus.textProvider === 'server' ? SERVER_TEXT_MODEL : TEXT_MODEL;
 }

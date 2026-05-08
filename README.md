@@ -29,6 +29,23 @@ npm run dev
 npm run dev -- --open
 ```
 
+## Private AI Backend
+
+The webapp exposes server-side API routes that proxy to the private Spark AI backend:
+
+- `GET /api/ai/health`
+- `POST /api/ai/ocr`
+- `POST /api/ai/embeddings`
+
+Configure the backend from the webapp server environment:
+
+```sh
+AI_BACKEND_URL=http://private-server-or-spark-proxy:8090
+AI_BACKEND_API_KEY=change-me
+```
+
+`AI_BACKEND_URL` should be reachable from the deployed webapp server. It does not need to be reachable from browsers.
+
 ## Building
 
 To create a production version of your app:

@@ -10,25 +10,43 @@
 		setSetting
 	} from '$lib/services/db';
 	import { fileToEvidenceImage } from '$lib/services/media';
-	import { embedEvidenceText, modelStatus, processEvidence, setOcrProvider } from '$lib/services/ai.svelte';
+	import {
+		embedEvidenceText,
+		modelStatus,
+		processEvidence,
+		setOcrProvider,
+		setTextEmbeddingProvider
+	} from '$lib/services/ai.svelte';
 	import { defaultFilters, searchEvidence, type SearchFilters } from '$lib/services/search';
 	import { exportProject, importProject } from '$lib/services/project';
-	import type { EvidenceItem, OcrProvider, SearchResult } from '$lib/types/evidence';
+	import type {
+		EvidenceItem,
+		OcrProvider,
+		SearchResult,
+		SearchTelemetry,
+		TextEmbeddingProvider
+	} from '$lib/types/evidence';
 
 	let evidence = $state<EvidenceItem[]>([]);
 	let results = $state<SearchResult[]>([]);
 	let selectedId = $state('');
 	let query = $state('');
 	let filters = $state<SearchFilters>(defaultFilters());
-	let activeMobileTab = $state<'board' | 'capture' | 'search' | 'scratchpad' | 'detail'>('board');
+	let activeMobileTab = $state<'board' | 'capture' | 'search' | 'scratchpad' | 'settings' | 'detail'>('board');
 	let noteDraft = $state('');
 	let scratchpad = $state('');
 	let scratchpadLoaded = $state(false);
 	let ocrProvider = $state<OcrProvider>('tesseract');
+	let textEmbeddingProvider = $state<TextEmbeddingProvider>('browser');
 	let mistralApiKey = $state('');
 	let mistralKeyLoaded = $state(false);
+	let aiSettingsLoaded = $state(false);
+	let aiBackendStatus = $state('');
+	let aiBackendChecking = $state(false);
 	let isDragging = $state(false);
 	let searchBusy = $state(false);
+	let searchTelemetry = $state<SearchTelemetry | undefined>();
+	let searchElapsedMs = $state(0);
 	let toast = $state('');
 	let selectedImageUrl = $state('');
 	let importInput: HTMLInputElement;
@@ -58,8 +76,13 @@
 			scratchpadLoaded = true;
 		});
 		void getSetting<OcrProvider>('ocrProvider', 'tesseract').then((value) => {
-			ocrProvider = value === 'mistral' ? 'mistral' : 'tesseract';
+			ocrProvider = value === 'mistral' || value === 'server' ? value : 'tesseract';
 			setOcrProvider(ocrProvider);
+		});
+		void getSetting<TextEmbeddingProvider>('textEmbeddingProvider', 'browser').then((value) => {
+			textEmbeddingProvider = value === 'server' ? 'server' : 'browser';
+			setTextEmbeddingProvider(textEmbeddingProvider);
+			aiSettingsLoaded = true;
 		});
 		void getSetting('mistralApiKey', '').then((value) => {
 			mistralApiKey = value;
@@ -85,15 +108,39 @@
 		const currentQuery = query;
 		const currentFilters = { ...filters };
 		const currentEvidence = evidence;
+		let interval: ReturnType<typeof setInterval> | undefined;
 
 		searchBusy = Boolean(currentQuery.trim());
-		void searchEvidence(currentEvidence, currentQuery, currentFilters)
+		searchElapsedMs = 0;
+
+		if (searchBusy) {
+			const startedAt = performance.now();
+			interval = setInterval(() => {
+				searchElapsedMs = performance.now() - startedAt;
+			}, 100);
+		} else {
+			searchTelemetry = undefined;
+		}
+
+		void searchEvidence(currentEvidence, currentQuery, currentFilters, (telemetry) => {
+			if (currentQuery === query) {
+				searchTelemetry = telemetry;
+				searchElapsedMs = (telemetry.finishedAt ?? performance.now()) - telemetry.startedAt;
+			}
+		})
 			.then((nextResults) => {
 				if (currentQuery === query) results = nextResults;
 			})
 			.finally(() => {
-				if (currentQuery === query) searchBusy = false;
+				if (currentQuery === query) {
+					searchBusy = false;
+					if (interval) clearInterval(interval);
+				}
 			});
+
+		return () => {
+			if (interval) clearInterval(interval);
+		};
 	});
 
 	$effect(() => {
@@ -119,6 +166,12 @@
 	$effect(() => {
 		setOcrProvider(ocrProvider);
 		void setSetting('ocrProvider', ocrProvider);
+	});
+
+	$effect(() => {
+		if (!aiSettingsLoaded) return;
+		setTextEmbeddingProvider(textEmbeddingProvider);
+		void setSetting('textEmbeddingProvider', textEmbeddingProvider);
 	});
 
 	$effect(() => {
@@ -294,6 +347,39 @@
 		return item.kind === 'note' && text === item.title ? '' : text;
 	}
 
+	function formatDuration(milliseconds: number | undefined) {
+		if (milliseconds === undefined) return '';
+		if (milliseconds < 1000) return `${Math.round(milliseconds)}ms`;
+		return `${(milliseconds / 1000).toFixed(1)}s`;
+	}
+
+	async function checkAiBackend() {
+		aiBackendChecking = true;
+		aiBackendStatus = 'Checking private backend...';
+
+		try {
+			const response = await fetch('/api/ai/health');
+			const text = await response.text();
+
+			if (!response.ok) {
+				aiBackendStatus = `Backend check failed (${response.status}): ${text || response.statusText}`;
+				return;
+			}
+
+			const health = JSON.parse(text) as {
+				ocr_provider?: string;
+				ocr_model?: string;
+				embedding_provider?: string;
+				embedding_model?: string;
+			};
+			aiBackendStatus = `Connected: OCR ${health.ocr_model ?? health.ocr_provider ?? 'ready'}, embeddings ${health.embedding_model ?? health.embedding_provider ?? 'ready'}`;
+		} catch (error) {
+			aiBackendStatus = error instanceof Error ? error.message : 'Backend check failed.';
+		} finally {
+			aiBackendChecking = false;
+		}
+	}
+
 	function parseScratchpad(value: string) {
 		return value.split(/(#\d+)/g).map((part) => {
 			const match = /^#(\d+)$/.exec(part);
@@ -347,6 +433,7 @@
 				<div class="flex items-center gap-2 overflow-x-auto">
 					<button class="text-button" onclick={() => (activeMobileTab = 'board')}>Board</button>
 					<button class="text-button" onclick={() => (activeMobileTab = 'scratchpad')}>Scratchpad</button>
+					<button class="text-button" onclick={() => (activeMobileTab = 'settings')}>Settings</button>
 					<button class="icon-button" title="Choose screenshots" onclick={() => imageInput.click()}>
 						<span>+</span>
 					</button>
@@ -386,8 +473,8 @@
 		onchange={(event) => handleImport(event.currentTarget.files)}
 	/>
 
-	<nav class="grid grid-cols-5 border-b border-[#2b3841] bg-[#17212a] text-sm md:hidden">
-		{#each ['board', 'capture', 'search', 'scratchpad', 'detail'] as tab}
+	<nav class="grid grid-cols-6 border-b border-[#2b3841] bg-[#17212a] text-sm md:hidden">
+		{#each ['board', 'capture', 'search', 'scratchpad', 'settings', 'detail'] as tab}
 			<button
 				class="px-1 py-3 text-xs capitalize {activeMobileTab === tab ? 'bg-[#22313b] text-[#fff8e8]' : 'text-[#a9b7b5]'}"
 				onclick={() => (activeMobileTab = tab as typeof activeMobileTab)}
@@ -423,35 +510,6 @@
 			<button class="mt-3 w-full rounded bg-[#c5a464] px-3 py-2 text-sm font-semibold text-[#172027]" onclick={addNote}>
 				Add note
 			</button>
-
-			<div class="mt-6 space-y-3 rounded border border-[#34414a] bg-[#17212a] p-3">
-				<label class="detail-label" for="ocr-provider">
-					OCR provider
-					<select id="ocr-provider" class="field mt-1" bind:value={ocrProvider}>
-						<option value="tesseract">Tesseract local</option>
-						<option value="mistral">Mistral OCR</option>
-					</select>
-				</label>
-
-				{#if ocrProvider === 'mistral'}
-					<label class="detail-label" for="mistral-key">
-						Mistral API key
-						<input
-							id="mistral-key"
-							class="field mt-1"
-							type="password"
-							autocomplete="off"
-							placeholder="Stored locally in this browser"
-							bind:value={mistralApiKey}
-						/>
-					</label>
-					<p class="text-xs leading-5 text-[#b7c3bf]">
-						Mistral OCR sends screenshots to Mistral's API and may be billed by Mistral. Existing evidence can be re-run with the Index button.
-					</p>
-				{:else}
-					<p class="text-xs leading-5 text-[#b7c3bf]">Tesseract runs locally in the browser and keeps OCR offline.</p>
-				{/if}
-			</div>
 
 			<div class="mt-6 space-y-3">
 				<h2 class="text-sm font-semibold text-[#e9ddc8]">Filters</h2>
@@ -570,6 +628,81 @@
 							{/if}
 						{/each}
 					</div>
+				</div>
+			</div>
+		</section>
+
+		<section class="min-w-0 p-4 {activeMobileTab === 'settings' ? 'block' : 'hidden'}">
+			<div class="mx-auto max-w-3xl space-y-4">
+				<div class="border-b border-[#34414a] pb-3">
+					<h2 class="text-lg font-semibold text-[#fff8e8]">Settings</h2>
+					<p class="mt-1 text-sm text-[#b7c3bf]">
+						Choose where OCR and text embeddings run. Private backend calls go through this webapp's server API routes.
+					</p>
+				</div>
+
+				<div class="settings-section">
+					<div>
+						<h3 class="text-sm font-semibold text-[#e9ddc8]">Private AI backend</h3>
+						<p class="mt-1 text-xs leading-5 text-[#b7c3bf]">
+							The backend hostname is configured with <code>AI_BACKEND_URL</code> on the deployed webapp server.
+						</p>
+					</div>
+					<div class="mt-3 flex flex-wrap items-center gap-2">
+						<button class="small-button" disabled={aiBackendChecking} onclick={checkAiBackend}>
+							{aiBackendChecking ? 'Checking' : 'Check connection'}
+						</button>
+						{#if aiBackendStatus}
+							<span class="text-xs text-[#b7c3bf]">{aiBackendStatus}</span>
+						{/if}
+					</div>
+				</div>
+
+				<div class="settings-section">
+					<label class="detail-label" for="ocr-provider">
+						OCR provider
+						<select id="ocr-provider" class="field mt-1" bind:value={ocrProvider}>
+							<option value="tesseract">Tesseract in browser</option>
+							<option value="mistral">Mistral OCR</option>
+							<option value="server">Private AI backend</option>
+						</select>
+					</label>
+
+					{#if ocrProvider === 'mistral'}
+						<label class="detail-label mt-3" for="mistral-key">
+							Mistral API key
+							<input
+								id="mistral-key"
+								class="field mt-1"
+								type="password"
+								autocomplete="off"
+								placeholder="Stored locally in this browser"
+								bind:value={mistralApiKey}
+							/>
+						</label>
+						<p class="mt-2 text-xs leading-5 text-[#b7c3bf]">
+							Mistral OCR sends screenshots to Mistral's API and may be billed by Mistral.
+						</p>
+					{:else if ocrProvider === 'server'}
+						<p class="mt-2 text-xs leading-5 text-[#b7c3bf]">
+							Screenshots are sent to your webapp server, then forwarded to the private AI backend.
+						</p>
+					{:else}
+						<p class="mt-2 text-xs leading-5 text-[#b7c3bf]">Tesseract runs locally in the browser.</p>
+					{/if}
+				</div>
+
+				<div class="settings-section">
+					<label class="detail-label" for="text-embedding-provider">
+						Text embedding provider
+						<select id="text-embedding-provider" class="field mt-1" bind:value={textEmbeddingProvider}>
+							<option value="browser">Browser model</option>
+							<option value="server">Private AI backend</option>
+						</select>
+					</label>
+					<p class="mt-2 text-xs leading-5 text-[#b7c3bf]">
+						This affects new notes, re-indexed evidence, and search queries. Existing vectors keep working; use Index on an item to regenerate it.
+					</p>
 				</div>
 			</div>
 		</section>
@@ -765,6 +898,21 @@
 		color: #e9ddc8;
 		font-size: 0.8rem;
 		font-weight: 600;
+	}
+
+	.settings-section {
+		border: 1px solid #34414a;
+		border-radius: 0.375rem;
+		background: #151f28;
+		padding: 1rem;
+	}
+
+	code {
+		border: 1px solid #3f4d55;
+		border-radius: 0.25rem;
+		background: #18222c;
+		padding: 0.05rem 0.25rem;
+		color: #f1d397;
 	}
 
 	.detail-textarea {

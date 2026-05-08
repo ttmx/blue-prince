@@ -1,0 +1,8 @@
+services:
+  spark-ai-backend:
+    build: .
+    env_file:
+      - .env
+    ports:
+      - "${SPARK_AI_PORT:-8090}:8090"
+    restart: unless-stopped
