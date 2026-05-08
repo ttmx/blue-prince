@@ -1,0 +1,12 @@
+.git
+.github
+.svelte-kit
+build
+node_modules
+example-images
+Dockerfile
+README.md
+.vscode
+.DS_Store
+npm-debug.log*
+bun-debug.log*
