@@ -1,7 +1,7 @@
 import { unzipSync, zipSync, strFromU8, strToU8 } from 'fflate';
 import { db, vectorToBuffer } from '$lib/services/db';
 import { blobToDataUrl, dataUrlToBlob } from '$lib/services/media';
-import type { EvidenceEmbedding, EvidenceItem } from '$lib/types/evidence';
+import type { EvidenceEmbedding, EvidenceItem, OcrProvider } from '$lib/types/evidence';
 
 type ExportedEvidence = Omit<EvidenceItem, 'imageBlob'> & {
 	imageDataUrl?: string;
@@ -13,6 +13,7 @@ type ProjectExport = {
 	evidence: ExportedEvidence[];
 	embeddings: Array<Omit<EvidenceEmbedding, 'id' | 'vector'> & { vector: number[] }>;
 	scratchpad?: string;
+	ocrProvider?: OcrProvider;
 };
 
 export async function exportProject() {
@@ -32,7 +33,8 @@ export async function exportProject() {
 			...embedding,
 			vector: Array.from(new Float32Array(vector))
 		})),
-		scratchpad: ((await db.settings.get('scratchpad'))?.value as string | undefined) ?? ''
+		scratchpad: ((await db.settings.get('scratchpad'))?.value as string | undefined) ?? '',
+		ocrProvider: (((await db.settings.get('ocrProvider'))?.value as OcrProvider | undefined) ?? 'tesseract')
 	};
 
 	const archive = zipSync({
@@ -72,6 +74,10 @@ export async function importProject(file: File) {
 
 		if (typeof project.scratchpad === 'string') {
 			await db.settings.put({ key: 'scratchpad', value: project.scratchpad });
+		}
+
+		if (project.ocrProvider === 'mistral' || project.ocrProvider === 'tesseract') {
+			await db.settings.put({ key: 'ocrProvider', value: project.ocrProvider });
 		}
 	});
 }

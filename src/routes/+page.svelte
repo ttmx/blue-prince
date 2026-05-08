@@ -10,10 +10,10 @@
 		setSetting
 	} from '$lib/services/db';
 	import { fileToEvidenceImage } from '$lib/services/media';
-	import { embedEvidenceText, modelStatus, processEvidence } from '$lib/services/ai.svelte';
+	import { embedEvidenceText, modelStatus, processEvidence, setOcrProvider } from '$lib/services/ai.svelte';
 	import { defaultFilters, searchEvidence, type SearchFilters } from '$lib/services/search';
 	import { exportProject, importProject } from '$lib/services/project';
-	import type { EvidenceItem, SearchResult } from '$lib/types/evidence';
+	import type { EvidenceItem, OcrProvider, SearchResult } from '$lib/types/evidence';
 
 	let evidence = $state<EvidenceItem[]>([]);
 	let results = $state<SearchResult[]>([]);
@@ -24,6 +24,9 @@
 	let noteDraft = $state('');
 	let scratchpad = $state('');
 	let scratchpadLoaded = $state(false);
+	let ocrProvider = $state<OcrProvider>('tesseract');
+	let mistralApiKey = $state('');
+	let mistralKeyLoaded = $state(false);
 	let isDragging = $state(false);
 	let searchBusy = $state(false);
 	let toast = $state('');
@@ -53,6 +56,14 @@
 		void getSetting('scratchpad', '').then((value) => {
 			scratchpad = value;
 			scratchpadLoaded = true;
+		});
+		void getSetting<OcrProvider>('ocrProvider', 'tesseract').then((value) => {
+			ocrProvider = value === 'mistral' ? 'mistral' : 'tesseract';
+			setOcrProvider(ocrProvider);
+		});
+		void getSetting('mistralApiKey', '').then((value) => {
+			mistralApiKey = value;
+			mistralKeyLoaded = true;
 		});
 
 		const pasteHandler = (event: ClipboardEvent) => {
@@ -100,6 +111,21 @@
 		const value = scratchpad;
 		const timeout = setTimeout(() => {
 			void setSetting('scratchpad', value);
+		}, 350);
+
+		return () => clearTimeout(timeout);
+	});
+
+	$effect(() => {
+		setOcrProvider(ocrProvider);
+		void setSetting('ocrProvider', ocrProvider);
+	});
+
+	$effect(() => {
+		if (!mistralKeyLoaded) return;
+		const value = mistralApiKey.trim();
+		const timeout = setTimeout(() => {
+			void setSetting('mistralApiKey', value);
 		}, 350);
 
 		return () => clearTimeout(timeout);
@@ -397,6 +423,35 @@
 			<button class="mt-3 w-full rounded bg-[#c5a464] px-3 py-2 text-sm font-semibold text-[#172027]" onclick={addNote}>
 				Add note
 			</button>
+
+			<div class="mt-6 space-y-3 rounded border border-[#34414a] bg-[#17212a] p-3">
+				<label class="detail-label" for="ocr-provider">
+					OCR provider
+					<select id="ocr-provider" class="field mt-1" bind:value={ocrProvider}>
+						<option value="tesseract">Tesseract local</option>
+						<option value="mistral">Mistral OCR</option>
+					</select>
+				</label>
+
+				{#if ocrProvider === 'mistral'}
+					<label class="detail-label" for="mistral-key">
+						Mistral API key
+						<input
+							id="mistral-key"
+							class="field mt-1"
+							type="password"
+							autocomplete="off"
+							placeholder="Stored locally in this browser"
+							bind:value={mistralApiKey}
+						/>
+					</label>
+					<p class="text-xs leading-5 text-[#b7c3bf]">
+						Mistral OCR sends screenshots to Mistral's API and may be billed by Mistral. Existing evidence can be re-run with the Index button.
+					</p>
+				{:else}
+					<p class="text-xs leading-5 text-[#b7c3bf]">Tesseract runs locally in the browser and keeps OCR offline.</p>
+				{/if}
+			</div>
 
 			<div class="mt-6 space-y-3">
 				<h2 class="text-sm font-semibold text-[#e9ddc8]">Filters</h2>

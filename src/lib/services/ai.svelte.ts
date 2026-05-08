@@ -1,10 +1,11 @@
-import { db, vectorToBuffer } from '$lib/services/db';
-import { createScaledImageBlob } from '$lib/services/media';
-import type { EvidenceItem, ModelStatus } from '$lib/types/evidence';
+import { db, getSetting, vectorToBuffer } from '$lib/services/db';
+import { blobToDataUrl, createScaledImageBlob } from '$lib/services/media';
+import type { EvidenceItem, ModelStatus, OcrProvider } from '$lib/types/evidence';
 
 const TEXT_MODEL = 'Xenova/all-MiniLM-L6-v2';
 export const IMAGE_MODEL = 'onnx-community/siglip2-so400m-patch16-384-ONNX';
 const OCR_LANG = 'eng';
+const MISTRAL_OCR_MODEL = 'mistral-ocr-latest';
 
 let ocrWorkerPromise: Promise<unknown> | undefined;
 let textExtractorPromise: Promise<unknown> | undefined;
@@ -19,6 +20,7 @@ let preferredDevice: 'webgpu' | 'wasm' | undefined;
 
 export const modelStatus = $state<ModelStatus>({
 	ocr: 'idle',
+	ocrProvider: 'tesseract',
 	text: 'idle',
 	image: 'idle',
 	backend: 'detecting',
@@ -34,6 +36,10 @@ function setBusy() {
 		modelStatus.image.startsWith('loading') ||
 		modelStatus.image === 'embedding' ||
 		modelStatus.image === 'embedding query';
+}
+
+export function setOcrProvider(provider: OcrProvider) {
+	modelStatus.ocrProvider = provider;
 }
 
 async function getPreferredDevice() {
@@ -143,12 +149,7 @@ export async function processEvidence(item: EvidenceItem) {
 	try {
 		modelStatus.ocr = 'processing';
 		setBusy();
-		const worker = (await getOcrWorker()) as {
-			recognize: (image: Blob) => Promise<{ data: { text: string } }>;
-		};
-		const ocrImage = await createScaledImageBlob(item.imageBlob);
-		const result = await worker.recognize(ocrImage);
-		const ocrText = result.data.text.trim();
+		const ocrText = await runOcr(item.imageBlob);
 
 		await db.evidence.update(item.id, {
 			ocrText,
@@ -179,6 +180,56 @@ export async function processEvidence(item: EvidenceItem) {
 		modelStatus.ocr = 'failed';
 		setBusy();
 	}
+}
+
+async function runOcr(blob: Blob) {
+	if (modelStatus.ocrProvider === 'mistral') {
+		return runMistralOcr(blob);
+	}
+
+	return runTesseractOcr(blob);
+}
+
+async function runTesseractOcr(blob: Blob) {
+	const worker = (await getOcrWorker()) as {
+		recognize: (image: Blob) => Promise<{ data: { text: string } }>;
+	};
+	const ocrImage = await createScaledImageBlob(blob);
+	const result = await worker.recognize(ocrImage);
+	return result.data.text.trim();
+}
+
+async function runMistralOcr(blob: Blob) {
+	const apiKey = (await getSetting('mistralApiKey', '')).trim();
+	if (!apiKey) {
+		throw new Error('Mistral OCR is selected, but no Mistral API key is saved.');
+	}
+
+	const response = await fetch('https://api.mistral.ai/v1/ocr', {
+		method: 'POST',
+		headers: {
+			Authorization: `Bearer ${apiKey}`,
+			'Content-Type': 'application/json'
+		},
+		body: JSON.stringify({
+			model: MISTRAL_OCR_MODEL,
+			document: {
+				type: 'image_url',
+				image_url: await blobToDataUrl(blob)
+			}
+		})
+	});
+
+	if (!response.ok) {
+		const message = await response.text();
+		throw new Error(`Mistral OCR failed (${response.status}): ${message || response.statusText}`);
+	}
+
+	const result = (await response.json()) as { pages?: Array<{ markdown?: string }> };
+	return (result.pages ?? [])
+		.map((page) => page.markdown?.trim())
+		.filter(Boolean)
+		.join('\n\n');
 }
 
 export async function embedEvidenceText(item: EvidenceItem) {

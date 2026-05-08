@@ -1,6 +1,7 @@
 export type EvidenceKind = 'screenshot' | 'note';
 export type ProcessingState = 'idle' | 'queued' | 'processing' | 'complete' | 'failed';
 export type EmbeddingModality = 'text' | 'image';
+export type OcrProvider = 'tesseract' | 'mistral';
 
 export type EvidenceItem = {
 	id: string;
@@ -43,6 +44,7 @@ export type SearchResult = {
 
 export type ModelStatus = {
 	ocr: string;
+	ocrProvider: OcrProvider;
 	text: string;
 	image: string;
 	backend: 'detecting' | 'webgpu' | 'wasm';
