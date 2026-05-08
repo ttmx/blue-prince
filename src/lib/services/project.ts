@@ -12,6 +12,7 @@ type ProjectExport = {
 	exportedAt: number;
 	evidence: ExportedEvidence[];
 	embeddings: Array<Omit<EvidenceEmbedding, 'id' | 'vector'> & { vector: number[] }>;
+	scratchpad?: string;
 };
 
 export async function exportProject() {
@@ -30,7 +31,8 @@ export async function exportProject() {
 		embeddings: embeddings.map(({ id, vector, ...embedding }) => ({
 			...embedding,
 			vector: Array.from(new Float32Array(vector))
-		}))
+		})),
+		scratchpad: ((await db.settings.get('scratchpad'))?.value as string | undefined) ?? ''
 	};
 
 	const archive = zipSync({
@@ -52,7 +54,7 @@ export async function importProject(file: File) {
 	const project = JSON.parse(strFromU8(projectFile)) as ProjectExport;
 	if (project.version !== 1) throw new Error('Unsupported project export version.');
 
-	await db.transaction('rw', db.evidence, db.embeddings, async () => {
+	await db.transaction('rw', db.evidence, db.embeddings, db.settings, async () => {
 		for (const item of project.evidence) {
 			const { imageDataUrl, ...evidence } = item;
 			await db.evidence.put({
@@ -66,6 +68,10 @@ export async function importProject(file: File) {
 				...embedding,
 				vector: vectorToBuffer(embedding.vector)
 			});
+		}
+
+		if (typeof project.scratchpad === 'string') {
+			await db.settings.put({ key: 'scratchpad', value: project.scratchpad });
 		}
 	});
 }

@@ -1,6 +1,14 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
-	import { createId, db, deleteEvidence, getAllEvidence, saveEvidencePatch } from '$lib/services/db';
+	import {
+		createId,
+		db,
+		deleteEvidence,
+		getAllEvidence,
+		getSetting,
+		saveEvidencePatch,
+		setSetting
+	} from '$lib/services/db';
 	import { fileToEvidenceImage } from '$lib/services/media';
 	import { embedEvidenceText, modelStatus, processEvidence } from '$lib/services/ai.svelte';
 	import { defaultFilters, searchEvidence, type SearchFilters } from '$lib/services/search';
@@ -12,8 +20,10 @@
 	let selectedId = $state('');
 	let query = $state('');
 	let filters = $state<SearchFilters>(defaultFilters());
-	let activeMobileTab = $state<'board' | 'capture' | 'search' | 'detail'>('board');
+	let activeMobileTab = $state<'board' | 'capture' | 'search' | 'scratchpad' | 'detail'>('board');
 	let noteDraft = $state('');
+	let scratchpad = $state('');
+	let scratchpadLoaded = $state(false);
 	let isDragging = $state(false);
 	let searchBusy = $state(false);
 	let toast = $state('');
@@ -23,6 +33,14 @@
 
 	const selected = $derived(evidence.find((item) => item.id === selectedId) ?? evidence[0]);
 	const visibleResults = $derived(query.trim() ? results : evidence.map((item) => ({ item, score: 0, reasons: [] })));
+	const evidenceNumbers = $derived(
+		new Map(
+			[...evidence]
+				.sort((first, second) => first.createdAt - second.createdAt || first.id.localeCompare(second.id))
+				.map((item, index) => [item.id, index + 1])
+		)
+	);
+	const scratchpadParts = $derived(parseScratchpad(scratchpad));
 	const tags = $derived([...new Set(evidence.flatMap((item) => item.tags))].sort());
 	const rooms = $derived([...new Set(evidence.map((item) => item.room).filter(Boolean))].sort());
 	const puzzles = $derived([...new Set(evidence.map((item) => item.puzzle).filter(Boolean))].sort());
@@ -32,6 +50,10 @@
 
 	onMount(() => {
 		void refresh();
+		void getSetting('scratchpad', '').then((value) => {
+			scratchpad = value;
+			scratchpadLoaded = true;
+		});
 
 		const pasteHandler = (event: ClipboardEvent) => {
 			const files = [...(event.clipboardData?.files ?? [])].filter((file) => file.type.startsWith('image/'));
@@ -71,6 +93,16 @@
 		return () => {
 			if (url) URL.revokeObjectURL(url);
 		};
+	});
+
+	$effect(() => {
+		if (!scratchpadLoaded) return;
+		const value = scratchpad;
+		const timeout = setTimeout(() => {
+			void setSetting('scratchpad', value);
+		}, 350);
+
+		return () => clearTimeout(timeout);
 	});
 
 	async function refresh() {
@@ -216,13 +248,31 @@
 		}, 2600);
 	}
 
-	function formatDate(timestamp: number) {
-		return new Intl.DateTimeFormat(undefined, {
-			month: 'short',
-			day: 'numeric',
-			hour: '2-digit',
-			minute: '2-digit'
-		}).format(timestamp);
+	function evidenceNumber(item: EvidenceItem) {
+		return evidenceNumbers.get(item.id) ?? 0;
+	}
+
+	function evidenceByNumber(number: number) {
+		return evidence.find((item) => evidenceNumber(item) === number);
+	}
+
+	function openEvidenceNumber(number: number) {
+		const item = evidenceByNumber(number);
+		if (!item) return;
+		selectedId = item.id;
+		activeMobileTab = 'detail';
+	}
+
+	function cardDescription(item: EvidenceItem) {
+		const text = item.ocrText || item.manualNotes || item.processingMessage || 'No text yet';
+		return item.kind === 'note' && text === item.title ? '' : text;
+	}
+
+	function parseScratchpad(value: string) {
+		return value.split(/(#\d+)/g).map((part) => {
+			const match = /^#(\d+)$/.exec(part);
+			return match ? { kind: 'ref' as const, text: part, number: Number(match[1]) } : { kind: 'text' as const, text: part };
+		});
 	}
 </script>
 
@@ -269,6 +319,8 @@
 				</label>
 
 				<div class="flex items-center gap-2 overflow-x-auto">
+					<button class="text-button" onclick={() => (activeMobileTab = 'board')}>Board</button>
+					<button class="text-button" onclick={() => (activeMobileTab = 'scratchpad')}>Scratchpad</button>
 					<button class="icon-button" title="Choose screenshots" onclick={() => imageInput.click()}>
 						<span>+</span>
 					</button>
@@ -308,10 +360,10 @@
 		onchange={(event) => handleImport(event.currentTarget.files)}
 	/>
 
-	<nav class="grid grid-cols-4 border-b border-[#2b3841] bg-[#17212a] text-sm md:hidden">
-		{#each ['board', 'capture', 'search', 'detail'] as tab}
+	<nav class="grid grid-cols-5 border-b border-[#2b3841] bg-[#17212a] text-sm md:hidden">
+		{#each ['board', 'capture', 'search', 'scratchpad', 'detail'] as tab}
 			<button
-				class="px-2 py-3 capitalize {activeMobileTab === tab ? 'bg-[#22313b] text-[#fff8e8]' : 'text-[#a9b7b5]'}"
+				class="px-1 py-3 text-xs capitalize {activeMobileTab === tab ? 'bg-[#22313b] text-[#fff8e8]' : 'text-[#a9b7b5]'}"
 				onclick={() => (activeMobileTab = tab as typeof activeMobileTab)}
 			>
 				{tab}
@@ -374,7 +426,7 @@
 			</div>
 		</aside>
 
-		<section class="min-w-0 p-4 {activeMobileTab === 'board' || activeMobileTab === 'search' ? 'block' : 'hidden'} md:block">
+		<section class="min-w-0 p-4 {activeMobileTab === 'board' || activeMobileTab === 'search' ? 'block' : 'hidden'}">
 			{#if visibleResults.length}
 				<div class="grid grid-cols-[repeat(auto-fill,minmax(210px,1fr))] gap-3">
 					{#each visibleResults as result (result.item.id)}
@@ -386,29 +438,31 @@
 							}}
 						>
 							{#if result.item.thumbnail}
-								<img class="h-32 w-full object-cover" src={result.item.thumbnail} alt="" />
+								<div class="relative">
+									<img class="h-44 w-full object-cover" src={result.item.thumbnail} alt="" />
+									<span class="absolute left-2 top-2 rounded bg-[#101820]/90 px-2 py-1 text-xs font-semibold text-[#f2d58d]">
+										#{evidenceNumber(result.item)}
+									</span>
+								</div>
 							{:else}
-								<div class="flex h-32 items-center justify-center bg-[#202b32] px-4 text-center text-sm text-[#d7cfbd]">
+								<div class="relative flex h-44 items-center justify-center bg-[#202b32] px-4 text-center text-sm text-[#d7cfbd]">
+									<span class="absolute left-2 top-2 rounded bg-[#101820]/90 px-2 py-1 text-xs font-semibold text-[#f2d58d]">
+										#{evidenceNumber(result.item)}
+									</span>
 									{result.item.manualNotes || 'Text note'}
 								</div>
 							{/if}
 							<div class="space-y-2 p-3 text-left">
-								<div class="flex items-start justify-between gap-2">
-									<h2 class="line-clamp-2 text-sm font-semibold text-[#fff8e8]">
-										{result.item.kind === 'screenshot'
-											? result.item.ocrText || result.item.manualNotes || 'Screenshot clue'
-											: result.item.title}
-									</h2>
-									{#if query}
-										<span class="rounded bg-[#244844] px-1.5 py-0.5 text-[11px] text-[#bff0e4]">
-											{Math.round(result.score * 100)}
-										</span>
-									{/if}
-								</div>
-								<p class="line-clamp-3 text-xs leading-5 text-[#b6c0bd]">
-									{result.item.ocrText || result.item.manualNotes || result.item.processingMessage || 'No text yet'}
-								</p>
+								{#if result.item.kind === 'note'}
+									<h2 class="line-clamp-2 text-sm font-semibold text-[#fff8e8]">{result.item.title}</h2>
+								{/if}
+								{#if cardDescription(result.item)}
+									<p class="line-clamp-2 text-xs leading-5 text-[#b6c0bd]">{cardDescription(result.item)}</p>
+								{/if}
 								<div class="flex flex-wrap gap-1">
+									{#if query}
+										<span class="tag border-[#2c665f] text-[#bff0e4]">{Math.round(result.score * 100)}</span>
+									{/if}
 									{#each result.item.tags.slice(0, 3) as tag}
 										<span class="tag">{tag}</span>
 									{/each}
@@ -416,7 +470,6 @@
 										<span class="tag border-[#715b33] text-[#eac77b]">{result.item.processingState}</span>
 									{/if}
 								</div>
-								<p class="text-[11px] text-[#7f908f]">{formatDate(result.item.updatedAt)}</p>
 							</div>
 						</button>
 					{/each}
@@ -433,10 +486,43 @@
 			{/if}
 		</section>
 
+		<section class="min-w-0 p-4 {activeMobileTab === 'scratchpad' ? 'block' : 'hidden'}">
+			<div class="grid h-full gap-4 xl:grid-cols-[minmax(0,1fr)_minmax(280px,0.7fr)]">
+				<label class="flex min-h-[60vh] flex-col text-sm font-semibold text-[#e9ddc8]">
+					Scratchpad
+					<textarea
+						class="mt-2 min-h-[60vh] flex-1 resize-none rounded border border-[#3f4d55] bg-[#18222c] p-4 text-sm font-normal leading-6 text-[#fff8e8] outline-none ring-[#7db7aa] placeholder:text-[#7f8f91] focus:ring-2"
+						placeholder="Write loose puzzle thoughts here. Reference evidence with #1, #2, #123..."
+						bind:value={scratchpad}
+					></textarea>
+				</label>
+
+				<div class="rounded border border-[#34414a] bg-[#151f28] p-4">
+					<h2 class="text-sm font-semibold text-[#e9ddc8]">Linked references</h2>
+					<div class="scratchpad-preview mt-3 text-sm leading-7 text-[#d3ddd8]">
+						{#each scratchpadParts as part}
+							{#if part.kind === 'ref'}
+								{@const linkedItem = evidenceByNumber(part.number)}
+								<button
+									class="scratchpad-ref {linkedItem ? '' : 'missing-ref'}"
+									disabled={!linkedItem}
+									onclick={() => openEvidenceNumber(part.number)}
+								>
+									{part.text}
+								</button>
+							{:else}
+								{part.text}
+							{/if}
+						{/each}
+					</div>
+				</div>
+			</div>
+		</section>
+
 		<aside class="workspace-panel {activeMobileTab === 'detail' ? 'block' : 'hidden'} md:block">
 			{#if selected}
 				<div class="flex items-center justify-between gap-3">
-					<h2 class="text-base font-semibold text-[#fff8e8]">Evidence detail</h2>
+					<h2 class="text-base font-semibold text-[#fff8e8]">Evidence #{evidenceNumber(selected)}</h2>
 					<div class="flex gap-2">
 						<button class="small-button" onclick={retrySelected}>Index</button>
 						<button class="small-button danger" onclick={removeSelected}>Delete</button>
@@ -639,5 +725,28 @@
 		font-size: 0.875rem;
 		line-height: 1.5;
 		outline: none;
+	}
+
+	.scratchpad-preview {
+		white-space: pre-wrap;
+	}
+
+	.scratchpad-ref {
+		border-radius: 0.25rem;
+		background: #244844;
+		padding: 0.08rem 0.28rem;
+		color: #bff0e4;
+		font-weight: 700;
+	}
+
+	.scratchpad-ref:hover {
+		background: #2d5d57;
+	}
+
+	.missing-ref,
+	.missing-ref:hover {
+		cursor: not-allowed;
+		background: #392b2d;
+		color: #d89b90;
 	}
 </style>

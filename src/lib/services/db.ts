@@ -31,6 +31,15 @@ export async function saveEvidencePatch(id: string, patch: Partial<EvidenceItem>
 	await db.evidence.update(id, { ...patch, updatedAt: Date.now() });
 }
 
+export async function getSetting<T>(key: string, fallback: T) {
+	const setting = await db.settings.get(key);
+	return setting ? (setting.value as T) : fallback;
+}
+
+export async function setSetting(key: string, value: unknown) {
+	await db.settings.put({ key, value });
+}
+
 export async function deleteEvidence(id: string) {
 	await db.transaction('rw', db.evidence, db.embeddings, async () => {
 		await db.evidence.delete(id);
