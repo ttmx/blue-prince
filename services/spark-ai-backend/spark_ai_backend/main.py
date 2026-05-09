@@ -11,8 +11,7 @@ from .providers import (
     EmbeddingResult,
     ProviderError,
     embed_with_openai_compatible,
-    embed_with_sentence_transformers,
-    ocr_with_openai_compatible,
+    ocr_with_paddleocr_vl_vllm,
 )
 from .security import require_api_key
 
@@ -74,9 +73,9 @@ SettingsDep = Annotated[Settings, Depends(get_settings)]
 async def health(settings: SettingsDep) -> HealthResponse:
     return HealthResponse(
         ok=True,
-        ocr_provider=settings.ocr_provider,
+        ocr_provider="paddleocr-vl-vllm",
         ocr_model=settings.ocr_model,
-        embedding_provider=settings.embedding_provider,
+        embedding_provider="ollama-openai-compatible",
         embedding_model=settings.embedding_model,
     )
 
@@ -91,9 +90,6 @@ async def ocr(
     mime_type: str | None = Form(default=None),
     prompt: str | None = Form(default=None),
 ) -> OcrResponse:
-    if settings.ocr_provider == "disabled":
-        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="OCR is disabled.")
-
     image_bytes: bytes
     resolved_mime_type = mime_type or "image/png"
 
@@ -115,7 +111,7 @@ async def ocr(
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="The image is empty.")
 
     try:
-        text = await ocr_with_openai_compatible(
+        text = await ocr_with_paddleocr_vl_vllm(
             image_bytes=image_bytes,
             mime_type=resolved_mime_type,
             prompt=prompt,
@@ -124,17 +120,11 @@ async def ocr(
     except ProviderError as error:
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(error)) from error
 
-    return OcrResponse(text=text, model=settings.ocr_model, provider=settings.ocr_provider)
+    return OcrResponse(text=text, model=settings.ocr_model, provider="paddleocr-vl-vllm")
 
 
 @app.post("/v1/embeddings", response_model=EmbeddingResponse)
 async def embeddings(body: EmbeddingRequest, _: Auth, settings: SettingsDep) -> EmbeddingResponse:
-    if settings.embedding_provider == "disabled":
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Embeddings are disabled.",
-        )
-
     inputs = [body.input] if isinstance(body.input, str) else body.input
     if not inputs or any(not item.strip() for item in inputs):
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Input text is required.")
@@ -142,14 +132,11 @@ async def embeddings(body: EmbeddingRequest, _: Auth, settings: SettingsDep) -> 
     model = body.model or settings.embedding_model
 
     try:
-        if settings.embedding_provider == "sentence-transformers":
-            result = embed_with_sentence_transformers(inputs, model)
-        else:
-            result = await embed_with_openai_compatible(inputs, model, settings)
+        result = await embed_with_openai_compatible(inputs, model, settings)
     except ProviderError as error:
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(error)) from error
 
-    return embedding_response(result, settings.embedding_provider)
+    return embedding_response(result, "ollama-openai-compatible")
 
 
 def decode_base64_image(value: str) -> bytes:
@@ -169,4 +156,3 @@ def embedding_response(result: EmbeddingResult, provider: str) -> EmbeddingRespo
         model=result.model,
         provider=provider,
     )
-

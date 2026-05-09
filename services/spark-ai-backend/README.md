@@ -1,8 +1,13 @@
 # Spark AI Backend
 
-Private OCR and embedding service for replacing hosted Mistral OCR and browser-side embedding work.
+Private OCR and embedding service for the Blue Prince evidence board.
 
-This service is meant to run on the server that can reach the NVIDIA Spark/DGX box. The public site backend calls this service, and this service calls the private model endpoint. The Spark never needs to be reachable from the internet.
+This backend intentionally has one model stack:
+
+- OCR: PaddleOCR-VL served by vLLM's OpenAI-compatible `/v1/chat/completions` endpoint.
+- Embeddings: `qwen3-embedding:8b` served by Ollama's OpenAI-compatible `/v1/embeddings` endpoint.
+
+The public webapp calls this backend; this backend calls the private local model runtimes. No hosted OCR or browser embedding fallback lives in this service.
 
 ## API
 
@@ -10,7 +15,7 @@ All non-health endpoints require `Authorization: Bearer $SPARK_AI_API_KEY` when 
 
 ### `GET /health`
 
-Returns service status and configured providers.
+Returns service status and model names.
 
 ### `POST /v1/ocr`
 
@@ -37,8 +42,8 @@ Returns:
 ```json
 {
   "text": "extracted text",
-  "model": "qwen2.5-vl:7b",
-  "provider": "openai-compatible"
+  "model": "PaddlePaddle/PaddleOCR-VL",
+  "provider": "paddleocr-vl-vllm"
 }
 ```
 
@@ -70,8 +75,8 @@ Returns OpenAI-style embeddings:
       "embedding": [0.01, 0.02]
     }
   ],
-  "model": "nomic-embed-text",
-  "provider": "openai-compatible"
+  "model": "qwen3-embedding:8b",
+  "provider": "ollama-openai-compatible"
 }
 ```
 
@@ -81,26 +86,22 @@ Copy `.env.example` to `.env` and adjust it for your deployment.
 
 Important variables:
 
-- `SPARK_AI_API_KEY`: shared secret expected from your site backend.
-- `OCR_PROVIDER`: `openai-compatible` or `disabled`.
-- `OCR_BASE_URL`: private Spark model API base URL, for example `http://10.0.0.42:11434/v1`.
-- `OCR_API_KEY`: optional upstream API key for the Spark endpoint.
-- `OCR_MODEL`: vision-capable model name exposed by the Spark endpoint.
-- `EMBEDDING_PROVIDER`: `openai-compatible`, `sentence-transformers`, or `disabled`.
-- `EMBEDDING_BASE_URL`: private Spark embedding API base URL.
+- `SPARK_AI_API_KEY`: optional shared secret expected from your site backend.
+- `OCR_BASE_URL`: vLLM `/v1` base URL, for example `http://127.0.0.1:18118/v1`.
+- `OCR_API_KEY`: optional upstream API key for the vLLM endpoint.
+- `OCR_MODEL`: PaddleOCR-VL model name served by vLLM.
+- `EMBEDDING_BASE_URL`: Ollama OpenAI-compatible `/v1` base URL.
 - `EMBEDDING_API_KEY`: optional upstream API key.
-- `EMBEDDING_MODEL`: embedding model name.
+- `EMBEDDING_MODEL`: Ollama embedding model name.
 
-For an Ollama deployment on the Spark, expose Ollama only on the private network and use its OpenAI-compatible `/v1` API:
+Example:
 
 ```env
-OCR_BASE_URL=http://spark-private-ip:11434/v1
-OCR_MODEL=qwen2.5vl:7b
-EMBEDDING_BASE_URL=http://spark-private-ip:11434/v1
-EMBEDDING_MODEL=nomic-embed-text
+OCR_BASE_URL=http://127.0.0.1:18118/v1
+OCR_MODEL=PaddlePaddle/PaddleOCR-VL
+EMBEDDING_BASE_URL=http://127.0.0.1:11434/v1
+EMBEDDING_MODEL=qwen3-embedding:8b
 ```
-
-For vLLM, llama.cpp server, NIM, or another OpenAI-compatible runtime, point the base URLs at that runtime's `/v1` root.
 
 ## Local Development
 
@@ -108,7 +109,7 @@ For vLLM, llama.cpp server, NIM, or another OpenAI-compatible runtime, point the
 cd services/spark-ai-backend
 python -m venv .venv
 . .venv/bin/activate
-pip install -e ".[local]"
+pip install -e .
 uvicorn spark_ai_backend.main:app --reload --host 0.0.0.0 --port 8090
 ```
 

@@ -43,6 +43,7 @@
 	let aiSettingsLoaded = $state(false);
 	let aiBackendStatus = $state('');
 	let aiBackendChecking = $state(false);
+	let reindexingAll = $state(false);
 	let isDragging = $state(false);
 	let searchBusy = $state(false);
 	let searchTelemetry = $state<SearchTelemetry | undefined>();
@@ -270,6 +271,33 @@
 		});
 		void processEvidence({ ...selected, processingState: 'queued' }).finally(refresh);
 		await refresh();
+	}
+
+	async function reindexAllEvidence() {
+		if (reindexingAll || !evidence.length) return;
+		reindexingAll = true;
+
+		const items = [...evidence].sort((first, second) => first.createdAt - second.createdAt || first.id.localeCompare(second.id));
+		showToast(`Re-indexing ${items.length} item${items.length === 1 ? '' : 's'}`);
+
+		for (const item of items) {
+			await saveEvidencePatch(item.id, {
+				processingState: 'queued',
+				processingMessage: 'Queued for re-indexing',
+				error: undefined
+			});
+		}
+		await refresh();
+
+		for (const item of items) {
+			const latest = await db.evidence.get(item.id);
+			if (!latest) continue;
+			await processEvidence({ ...latest, processingState: 'queued' });
+			await refresh();
+		}
+
+		reindexingAll = false;
+		showToast('Re-indexing complete');
 	}
 
 	async function removeSelected() {
@@ -701,8 +729,16 @@
 						</select>
 					</label>
 					<p class="mt-2 text-xs leading-5 text-[#b7c3bf]">
-						This affects new notes, re-indexed evidence, and search queries. Existing vectors keep working; use Index on an item to regenerate it.
+						This affects new notes, re-indexed evidence, and search queries. Existing vectors keep working until regenerated.
 					</p>
+					<div class="mt-3 flex items-center justify-between gap-3">
+						<p class="text-xs text-[#b7c3bf]">
+							{processingCount ? `${processingCount} item${processingCount === 1 ? '' : 's'} processing` : 'Index stored evidence with the current providers.'}
+						</p>
+						<button class="small-button" onclick={reindexAllEvidence} disabled={reindexingAll || !evidence.length}>
+							{reindexingAll ? 'Indexing' : 'Index all'}
+						</button>
+					</div>
 				</div>
 			</div>
 		</section>
@@ -827,6 +863,11 @@
 		border-radius: 0.25rem;
 		padding: 0.35rem 0.55rem;
 		font-size: 0.75rem;
+	}
+
+	.small-button:disabled {
+		cursor: not-allowed;
+		opacity: 0.55;
 	}
 
 	.danger {

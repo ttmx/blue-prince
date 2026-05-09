@@ -1,6 +1,5 @@
 import base64
 from dataclasses import dataclass
-from functools import lru_cache
 from typing import Any
 
 import httpx
@@ -8,10 +7,7 @@ import httpx
 from .config import Settings
 
 
-DEFAULT_OCR_PROMPT = (
-    "Extract all readable text from this image. Preserve headings, labels, lists, and line breaks "
-    "where useful. Return only the extracted text."
-)
+PADDLEOCR_VL_VLLM_PROMPT = "OCR:"
 
 
 class ProviderError(RuntimeError):
@@ -24,7 +20,7 @@ class EmbeddingResult:
     model: str
 
 
-async def ocr_with_openai_compatible(
+async def ocr_with_paddleocr_vl_vllm(
     image_bytes: bytes,
     mime_type: str,
     prompt: str | None,
@@ -37,15 +33,16 @@ async def ocr_with_openai_compatible(
             {
                 "role": "user",
                 "content": [
-                    {"type": "text", "text": prompt or DEFAULT_OCR_PROMPT},
                     {
                         "type": "image_url",
                         "image_url": {"url": f"data:{mime_type};base64,{image_base64}"},
                     },
+                    {"type": "text", "text": prompt or PADDLEOCR_VL_VLLM_PROMPT},
                 ],
             }
         ],
         "temperature": 0,
+        "max_tokens": 2048,
     }
 
     data = await post_openai_compatible(
@@ -59,18 +56,9 @@ async def ocr_with_openai_compatible(
     try:
         content = data["choices"][0]["message"]["content"]
     except (KeyError, IndexError, TypeError) as error:
-        raise ProviderError("OCR provider returned an unexpected response shape.") from error
+        raise ProviderError("PaddleOCR-VL vLLM returned an unexpected response shape.") from error
 
-    if isinstance(content, list):
-        text = "\n".join(
-            part.get("text", "")
-            for part in content
-            if isinstance(part, dict) and part.get("type") in {"text", "output_text"}
-        )
-    else:
-        text = str(content)
-
-    return text.strip()
+    return str(content).strip()
 
 
 async def embed_with_openai_compatible(
@@ -94,21 +82,6 @@ async def embed_with_openai_compatible(
         raise ProviderError("Embedding provider returned an unexpected response shape.") from error
 
     return EmbeddingResult(embeddings=embeddings, model=str(data.get("model") or model))
-
-
-def embed_with_sentence_transformers(inputs: list[str], model: str) -> EmbeddingResult:
-    try:
-        encoder = get_sentence_transformer(model)
-        output = encoder.encode(inputs, normalize_embeddings=True)
-    except ImportError as error:
-        raise ProviderError(
-            "sentence-transformers is not installed. Install the local extra or use openai-compatible."
-        ) from error
-    except Exception as error:
-        raise ProviderError(f"Local embedding failed: {error}") from error
-
-    embeddings = [coerce_embedding(row) for row in output]
-    return EmbeddingResult(embeddings=embeddings, model=model)
 
 
 async def post_openai_compatible(
@@ -141,11 +114,3 @@ async def post_openai_compatible(
 
 def coerce_embedding(value: Any) -> list[float]:
     return [float(item) for item in value]
-
-
-@lru_cache
-def get_sentence_transformer(model: str) -> Any:
-    from sentence_transformers import SentenceTransformer
-
-    return SentenceTransformer(model)
-
