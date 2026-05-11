@@ -52,9 +52,10 @@
 	let selectedImageUrl = $state('');
 	let importInput: HTMLInputElement;
 	let imageInput: HTMLInputElement;
+	let searchRequestId = 0;
 
 	const selected = $derived(evidence.find((item) => item.id === selectedId) ?? evidence[0]);
-	const visibleResults = $derived(query.trim() ? results : evidence.map((item) => ({ item, score: 0, reasons: [] })));
+	const visibleResults = $derived(results);
 	const evidenceNumbers = $derived(
 		new Map(
 			[...evidence]
@@ -109,6 +110,7 @@
 		const currentQuery = query;
 		const currentFilters = { ...filters };
 		const currentEvidence = evidence;
+		const requestId = ++searchRequestId;
 		let interval: ReturnType<typeof setInterval> | undefined;
 
 		searchBusy = Boolean(currentQuery.trim());
@@ -124,16 +126,16 @@
 		}
 
 		void searchEvidence(currentEvidence, currentQuery, currentFilters, (telemetry) => {
-			if (currentQuery === query) {
+			if (requestId === searchRequestId) {
 				searchTelemetry = telemetry;
 				searchElapsedMs = (telemetry.finishedAt ?? performance.now()) - telemetry.startedAt;
 			}
 		})
 			.then((nextResults) => {
-				if (currentQuery === query) results = nextResults;
+				if (requestId === searchRequestId) results = nextResults;
 			})
 			.finally(() => {
-				if (currentQuery === query) {
+				if (requestId === searchRequestId) {
 					searchBusy = false;
 					if (interval) clearInterval(interval);
 				}
